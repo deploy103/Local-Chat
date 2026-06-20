@@ -1,0 +1,116 @@
+<!doctype html>
+<html lang="ko">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Local Chat</title>
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <div class="app-shell">
+      <header class="topbar">
+        <div>
+          <p class="eyebrow">LOCAL CHAT</p>
+          <h1>IP 기반 실시간 채팅</h1>
+        </div>
+        <div class="connection" id="connectionStatus">연결 준비 중</div>
+      </header>
+
+      <main>
+        <section class="lobby" id="lobbyView">
+          <div class="lobby-panel">
+            <div class="panel-heading">
+              <h2>방 만들기</h2>
+              <span class="pill" id="myIpLabel">IP 확인 중</span>
+            </div>
+            <button class="primary-action" id="createRoomButton" type="button">새 방 생성</button>
+          </div>
+
+          <form class="lobby-panel" id="joinForm">
+            <div class="panel-heading">
+              <h2>방 참가</h2>
+              <span class="pill">4자리 코드</span>
+            </div>
+            <div class="join-row">
+              <input
+                id="roomCodeInput"
+                type="text"
+                inputmode="numeric"
+                autocomplete="one-time-code"
+                maxlength="4"
+                placeholder="0000"
+              />
+              <button type="submit">입장</button>
+            </div>
+          </form>
+        </section>
+
+        <section class="chat-view hidden" id="chatView">
+          <aside class="sidebar">
+            <div class="room-summary">
+              <p class="eyebrow">ROOM</p>
+              <div class="room-code-row">
+                <strong id="roomCodeLabel">----</strong>
+                <button class="icon-button" id="copyCodeButton" type="button" title="초대 코드 복사">복사</button>
+              </div>
+              <div class="meta-line" id="ownerLabel">방장 확인 중</div>
+            </div>
+
+            <div class="side-section">
+              <div class="section-title">
+                <h3>접속자</h3>
+                <span id="userCount">0</span>
+              </div>
+              <ul class="user-list" id="userList"></ul>
+            </div>
+
+            <div class="side-section">
+              <div class="section-title">
+                <h3>검색 기록</h3>
+                <button class="text-button" id="clearSearchHistoryButton" type="button">지우기</button>
+              </div>
+              <div class="history-list" id="searchHistory"></div>
+            </div>
+
+            <div class="side-section">
+              <div class="section-title">
+                <h3>파일</h3>
+                <span id="fileCount">0</span>
+              </div>
+              <div class="upload-zone" id="dropZone">
+                <input id="fileInput" type="file" multiple />
+                <button id="pickFileButton" type="button">파일 선택</button>
+                <p>최대 10개, 총 100MB, 24시간 보관</p>
+              </div>
+            </div>
+
+            <button class="danger-action hidden" id="destroyRoomButton" type="button">방 터뜨리기</button>
+          </aside>
+
+          <section class="chat-panel">
+            <div class="chat-toolbar">
+              <button class="secondary-action" id="leaveRoomButton" type="button">나가기</button>
+              <div class="search-box">
+                <input id="searchInput" type="search" placeholder="채팅 검색" />
+                <button class="text-button" id="clearSearchButton" type="button">초기화</button>
+              </div>
+            </div>
+
+            <div class="messages" id="messages"></div>
+            <div class="typing-line" id="typingLine"></div>
+
+            <form class="composer" id="messageForm">
+              <textarea id="messageInput" rows="1" maxlength="2000" placeholder="메시지 입력"></textarea>
+              <button type="submit">전송</button>
+            </form>
+          </section>
+        </section>
+      </main>
+
+      <div class="toast-stack" id="toastStack"></div>
+    </div>
+
+    <script src="/socket.io/socket.io.js"></script>
+    <script src="/app.js"></script>
+  </body>
+</html>
