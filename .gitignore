@@ -2,5 +2,19 @@ node_modules/
 uploads/
 data/
 .env
+.env.*
+!.env.example
 server.txt
 npm-debug.log*
+*.log
+
+# Local notes / scratch files
+만들거
+
+# Browser/test artifacts
+.chrome-test/
+local-chat-*.png
+
+# OS/editor noise
+.DS_Store
+Thumbs.db

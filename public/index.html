@@ -3,62 +3,85 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Local Chat</title>
+    <title>DropChat</title>
     <link rel="stylesheet" href="/styles.css" />
   </head>
   <body>
     <div class="app-shell">
-      <header class="topbar">
-        <div>
-          <p class="eyebrow">LOCAL CHAT</p>
-          <h1>IP 기반 실시간 채팅</h1>
-        </div>
-        <div class="connection" id="connectionStatus">연결 준비 중</div>
-      </header>
-
-      <main>
-        <section class="lobby" id="lobbyView">
-          <div class="lobby-panel">
-            <div class="panel-heading">
-              <h2>방 만들기</h2>
-              <span class="pill" id="myIpLabel">IP 확인 중</span>
-            </div>
-            <button class="primary-action" id="createRoomButton" type="button">새 방 생성</button>
+      <aside class="sidebar" id="sidebar">
+        <header class="sidebar-header">
+          <div class="brand">
+            <span class="brand-mark" aria-hidden="true">DC</span>
+            <h1>DropChat</h1>
           </div>
+          <div class="connection" id="connectionStatus" role="status" aria-live="polite">
+            연결 준비 중
+          </div>
+        </header>
 
-          <form class="lobby-panel" id="joinForm">
-            <div class="panel-heading">
-              <h2>방 참가</h2>
-              <span class="pill">4자리 코드</span>
+        <div class="sidebar-scroll">
+          <section class="sidebar-card" id="lobbySidebar">
+            <div class="section-title">
+              <h2>로컬 방 접속</h2>
             </div>
-            <div class="join-row">
-              <input
-                id="roomCodeInput"
-                type="text"
-                inputmode="numeric"
-                autocomplete="one-time-code"
-                maxlength="4"
-                placeholder="0000"
-              />
-              <button type="submit">입장</button>
-            </div>
-          </form>
-        </section>
 
-        <section class="chat-view hidden" id="chatView">
-          <aside class="sidebar">
+            <form class="join-form" id="joinForm">
+              <div class="join-field">
+                <input
+                  id="roomCodeInput"
+                  type="text"
+                  inputmode="numeric"
+                  autocomplete="one-time-code"
+                  maxlength="10"
+                  placeholder="4자리 코드 또는 초대 링크"
+                  aria-label="방 코드"
+                />
+                <button id="joinRoomButton" type="submit">접속</button>
+              </div>
+            </form>
+
+            <div class="divider">
+              <span>또는</span>
+            </div>
+
+            <button class="secondary-action" id="createRoomButton" type="button">
+              새 방 만들기
+            </button>
+
+            <div class="recent-room hidden" id="recentRoom"></div>
+          </section>
+
+          <section class="room-sidebar hidden" id="roomSidebar">
             <div class="room-summary">
-              <p class="eyebrow">ROOM</p>
+              <div class="room-heading">
+                <span>ROOM</span>
+                <button class="icon-button" id="copyCodeButton" type="button" title="초대 링크 복사">
+                  링크 복사
+                </button>
+              </div>
               <div class="room-code-row">
-                <strong id="roomCodeLabel">----</strong>
-                <button class="icon-button" id="copyCodeButton" type="button" title="초대 코드 복사">복사</button>
+                <strong>#<span id="roomCodeLabel">----</span></strong>
               </div>
               <div class="meta-line" id="ownerLabel">방장 확인 중</div>
+              <div class="room-stats" aria-label="방 상태">
+                <div>
+                  <span>메시지</span>
+                  <strong id="messageCount">0</strong>
+                </div>
+                <div>
+                  <span>파일</span>
+                  <strong id="summaryFileCount">0</strong>
+                </div>
+                <div>
+                  <span>접속</span>
+                  <strong id="summaryUserCount">0</strong>
+                </div>
+              </div>
             </div>
 
             <div class="side-section">
               <div class="section-title">
-                <h3>접속자</h3>
+                <h2>접속자</h2>
                 <span id="userCount">0</span>
               </div>
               <ul class="user-list" id="userList"></ul>
@@ -66,44 +89,95 @@
 
             <div class="side-section">
               <div class="section-title">
-                <h3>검색 기록</h3>
-                <button class="text-button" id="clearSearchHistoryButton" type="button">지우기</button>
-              </div>
-              <div class="history-list" id="searchHistory"></div>
-            </div>
-
-            <div class="side-section">
-              <div class="section-title">
-                <h3>파일</h3>
+                <h2>공유된 파일</h2>
                 <span id="fileCount">0</span>
               </div>
               <div class="upload-zone" id="dropZone">
                 <input id="fileInput" type="file" multiple />
-                <button id="pickFileButton" type="button">파일 선택</button>
-                <p>최대 10개, 총 100MB, 24시간 보관</p>
+                <div class="upload-zone-copy">
+                  <strong>파일 드롭</strong>
+                  <span>최대 10개, 총 100MB</span>
+                </div>
+                <div
+                  class="upload-progress hidden"
+                  id="uploadProgress"
+                  role="progressbar"
+                  aria-valuemin="0"
+                  aria-valuemax="100"
+                  aria-valuenow="0"
+                >
+                  <span></span>
+                </div>
               </div>
+              <div class="file-list" id="fileList"></div>
             </div>
 
-            <button class="danger-action hidden" id="destroyRoomButton" type="button">방 터뜨리기</button>
-          </aside>
+            <div class="side-section">
+              <div class="section-title">
+                <h2>검색 기록</h2>
+                <button class="text-button" id="clearSearchHistoryButton" type="button">지우기</button>
+              </div>
+              <div class="history-list" id="searchHistory"></div>
+            </div>
+          </section>
+        </div>
 
-          <section class="chat-panel">
-            <div class="chat-toolbar">
-              <button class="secondary-action" id="leaveRoomButton" type="button">나가기</button>
+        <footer class="profile-panel">
+          <label for="nicknameInput">닉네임</label>
+          <input
+            id="nicknameInput"
+            type="text"
+            maxlength="24"
+            autocomplete="nickname"
+            placeholder="닉네임 입력"
+          />
+          <div class="profile-ip">
+            <span>내 IP</span>
+            <strong id="myIpLabel">확인 중</strong>
+          </div>
+        </footer>
+      </aside>
+
+      <main class="main-area" id="mainArea">
+        <section class="lobby-view" id="lobbyView">
+          <div class="empty-room">
+            <div class="empty-icon" aria-hidden="true">#</div>
+            <h2>열려 있는 방 없음</h2>
+            <p>좌측에서 방을 만들거나 코드를 입력하세요.</p>
+          </div>
+        </section>
+
+        <section class="chat-view hidden" id="chatView">
+          <header class="chat-header">
+            <button class="back-button" id="leaveRoomButton" type="button" title="나가기">나가기</button>
+            <div class="chat-title">
+              <h2>방 <span id="roomCodeMirror">----</span></h2>
+              <p>로컬 네트워크 채팅</p>
+            </div>
+            <div class="header-actions">
               <div class="search-box">
                 <input id="searchInput" type="search" placeholder="채팅 검색" />
                 <button class="text-button" id="clearSearchButton" type="button">초기화</button>
               </div>
+              <button class="danger-action hidden" id="destroyRoomButton" type="button">방 삭제</button>
             </div>
+          </header>
 
-            <div class="messages" id="messages"></div>
-            <div class="typing-line" id="typingLine"></div>
+          <div class="messages" id="messages"></div>
+          <div class="typing-line" id="typingLine"></div>
 
-            <form class="composer" id="messageForm">
-              <textarea id="messageInput" rows="1" maxlength="2000" placeholder="메시지 입력"></textarea>
-              <button type="submit">전송</button>
-            </form>
-          </section>
+          <form class="composer" id="messageForm">
+            <button class="attach-button" id="pickFileButton" type="button" title="파일 첨부">
+              첨부
+            </button>
+            <textarea
+              id="messageInput"
+              rows="1"
+              maxlength="2000"
+              placeholder="메시지를 입력하세요"
+            ></textarea>
+            <button class="send-button" id="messageSendButton" type="submit">전송</button>
+          </form>
         </section>
       </main>
 

@@ -1,0 +1,621 @@
+<!DOCTYPE html>
+<html lang="ko" class="dark">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>DropChat - Local Secure Chat</title>
+    <!-- Tailwind CSS -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <!-- Phosphor Icons -->
+    <script src="https://unpkg.com/@phosphor-icons/web"></script>
+    <!-- Pretendard Font -->
+    <link rel="stylesheet" as="style" crossorigin href="https://cdn.jsdelivr.net/gh/orioncactus/pretendard@v1.3.9/dist/web/static/pretendard.css" />
+    
+    <script>
+        tailwind.config = {
+            darkMode: 'class',
+            theme: {
+                extend: {
+                    fontFamily: {
+                        sans: ['Pretendard', 'sans-serif'],
+                    },
+                    colors: {
+                        zinc: {
+                            850: '#202024',
+                            900: '#18181b',
+                            950: '#09090b',
+                        }
+                    },
+                    borderRadius: {
+                        'lg': '8px', // 버튼/입력창 8px 기준
+                    }
+                }
+            }
+        }
+    </script>
+    <style>
+        /* 커스텀 스크롤바 */
+        ::-webkit-scrollbar {
+            width: 6px;
+            height: 6px;
+        }
+        ::-webkit-scrollbar-track {
+            background: transparent;
+        }
+        ::-webkit-scrollbar-thumb {
+            background: #3f3f46;
+            border-radius: 8px;
+        }
+        ::-webkit-scrollbar-thumb:hover {
+            background: #52525b;
+        }
+
+        /* 파일 드래그 앤 드롭 오버레이 애니메이션 */
+        .drag-active {
+            border: 2px dashed #6366f1 !important;
+            background-color: rgba(79, 70, 229, 0.1) !important;
+        }
+
+        /* 타이핑 애니메이션 */
+        .typing-dot {
+            animation: typing 1.4s infinite ease-in-out both;
+        }
+        .typing-dot:nth-child(1) { animation-delay: -0.32s; }
+        .typing-dot:nth-child(2) { animation-delay: -0.16s; }
+        @keyframes typing {
+            0%, 80%, 100% { transform: scale(0); }
+            40% { transform: scale(1); }
+        }
+    </style>
+</head>
+<body class="bg-zinc-950 text-zinc-100 h-screen w-full flex overflow-hidden selection:bg-indigo-500/30">
+
+    <!-- 좌측 사이드바 (모바일에서는 방 진입 전 화면으로 사용) -->
+    <aside id="sidebar" class="w-full md:w-80 h-full bg-zinc-900 border-r border-zinc-800 flex flex-col transition-all duration-300 z-20 flex-shrink-0">
+        <!-- 상단 로고 및 연결 상태 -->
+        <div class="h-16 flex items-center justify-between px-5 border-b border-zinc-800">
+            <div class="flex items-center gap-2">
+                <div class="w-8 h-8 rounded-lg bg-indigo-600 flex items-center justify-center shadow-lg shadow-indigo-500/20">
+                    <i class="ph ph-lightning text-xl text-white"></i>
+                </div>
+                <h1 class="font-bold text-lg tracking-tight">DropChat</h1>
+            </div>
+            <div class="flex items-center gap-1.5 px-2 py-1 bg-zinc-800/50 rounded-lg border border-zinc-700/50" title="서버 연결됨">
+                <span class="relative flex h-2.5 w-2.5">
+                    <span class="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
+                    <span class="relative inline-flex rounded-full h-2.5 w-2.5 bg-emerald-500"></span>
+                </span>
+                <span class="text-xs text-zinc-400 font-medium">연결됨</span>
+            </div>
+        </div>
+
+        <div class="flex-1 overflow-y-auto p-4 flex flex-col gap-6">
+            
+            <!-- 로비: 방 접속/생성 (항상 보임) -->
+            <div class="bg-zinc-850 p-4 rounded-lg border border-zinc-800">
+                <h2 class="text-sm font-semibold text-zinc-400 mb-3 flex items-center gap-2">
+                    <i class="ph ph-door"></i> 로컬 방 접속
+                </h2>
+                <div class="flex flex-col gap-3">
+                    <div class="relative">
+                        <input type="text" id="roomCodeInput" placeholder="4자리 코드 입력 또는 링크 붙여넣기" maxlength="10" 
+                               class="w-full bg-zinc-900 border border-zinc-700 text-sm rounded-lg px-3 py-2.5 focus:outline-none focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500 transition-colors placeholder:text-zinc-500">
+                        <button onclick="joinRoom()" class="absolute right-1 top-1 bottom-1 px-3 bg-indigo-600 hover:bg-indigo-500 text-white text-sm font-medium rounded-lg transition-colors">
+                            접속
+                        </button>
+                    </div>
+                    <div class="flex items-center gap-2">
+                        <div class="h-px bg-zinc-800 flex-1"></div>
+                        <span class="text-xs text-zinc-500">또는</span>
+                        <div class="h-px bg-zinc-800 flex-1"></div>
+                    </div>
+                    <button onclick="createRoom()" class="w-full flex items-center justify-center gap-2 py-2.5 bg-zinc-800 hover:bg-zinc-700 border border-zinc-700 rounded-lg text-sm font-medium transition-colors">
+                        <i class="ph ph-plus-circle text-lg"></i>
+                        새 방 만들기
+                    </button>
+                </div>
+            </div>
+
+            <!-- 최근 접속한 방 -->
+            <div id="recentRooms" class="flex flex-col gap-2">
+                <h2 class="text-xs font-semibold text-zinc-500 uppercase tracking-wider px-1">최근 방</h2>
+                <button class="flex items-center justify-between p-3 rounded-lg hover:bg-zinc-850 transition-colors text-left group">
+                    <div class="flex items-center gap-3">
+                        <div class="w-10 h-10 rounded-lg bg-zinc-800 flex items-center justify-center text-zinc-400 font-mono font-medium group-hover:text-indigo-400 group-hover:bg-indigo-500/10 transition-colors">
+                            8291
+                        </div>
+                        <div>
+                            <p class="text-sm font-medium text-zinc-200">#8291</p>
+                            <p class="text-xs text-zinc-500">2시간 전</p>
+                        </div>
+                    </div>
+                    <i class="ph ph-sign-in text-zinc-600 group-hover:text-indigo-400"></i>
+                </button>
+            </div>
+
+            <!-- 현재 방 정보 (방 접속 시에만 표시됨) -->
+            <div id="roomInfoPanel" class="hidden flex-col gap-6">
+                <!-- 접속자 목록 -->
+                <div class="flex flex-col gap-2">
+                    <div class="flex items-center justify-between px-1">
+                        <h2 class="text-xs font-semibold text-zinc-500 uppercase tracking-wider">접속자 (3)</h2>
+                    </div>
+                    <div class="flex flex-col gap-1">
+                        <!-- 나 (방장) -->
+                        <div class="flex items-center justify-between p-2 rounded-lg bg-zinc-850 border border-zinc-800">
+                            <div class="flex items-center gap-2">
+                                <div class="relative">
+                                    <div class="w-8 h-8 rounded-lg bg-indigo-500/20 flex items-center justify-center text-indigo-400 font-medium text-xs border border-indigo-500/30">
+                                        나
+                                    </div>
+                                    <span class="absolute -bottom-0.5 -right-0.5 w-2.5 h-2.5 bg-emerald-500 border-2 border-zinc-850 rounded-full"></span>
+                                </div>
+                                <div class="flex flex-col">
+                                    <span class="text-sm font-medium flex items-center gap-1">192.168.0.12 <i class="ph-fill ph-crown text-amber-500 text-xs" title="방장"></i></span>
+                                    <span class="text-[10px] text-zinc-500">현재 기기</span>
+                                </div>
+                            </div>
+                        </div>
+                        <!-- 다른 사람 -->
+                        <div class="flex items-center justify-between p-2 rounded-lg hover:bg-zinc-850 transition-colors">
+                            <div class="flex items-center gap-2">
+                                <div class="relative">
+                                    <div class="w-8 h-8 rounded-lg bg-zinc-800 flex items-center justify-center text-zinc-400 font-medium text-xs">
+                                        0.45
+                                    </div>
+                                    <span class="absolute -bottom-0.5 -right-0.5 w-2.5 h-2.5 bg-emerald-500 border-2 border-zinc-900 rounded-full"></span>
+                                </div>
+                                <div class="flex flex-col">
+                                    <span class="text-sm font-medium">192.168.0.45</span>
+                                </div>
+                            </div>
+                        </div>
+                        <div class="flex items-center justify-between p-2 rounded-lg hover:bg-zinc-850 transition-colors opacity-60">
+                            <div class="flex items-center gap-2">
+                                <div class="relative">
+                                    <div class="w-8 h-8 rounded-lg bg-zinc-800 flex items-center justify-center text-zinc-400 font-medium text-xs">
+                                        0.88
+                                    </div>
+                                    <span class="absolute -bottom-0.5 -right-0.5 w-2.5 h-2.5 bg-zinc-600 border-2 border-zinc-900 rounded-full"></span>
+                                </div>
+                                <div class="flex flex-col">
+                                    <span class="text-sm font-medium">192.168.0.88</span>
+                                    <span class="text-[10px] text-zinc-500">자리비움</span>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- 파일 목록 -->
+                <div class="flex flex-col gap-2">
+                    <div class="flex items-center justify-between px-1">
+                        <h2 class="text-xs font-semibold text-zinc-500 uppercase tracking-wider">공유된 파일 (2)</h2>
+                    </div>
+                    <div class="flex flex-col gap-2">
+                        <div class="flex items-center gap-3 p-2.5 bg-zinc-850 border border-zinc-800 rounded-lg group cursor-pointer hover:border-indigo-500/50 transition-colors">
+                            <div class="w-8 h-8 rounded bg-blue-500/10 text-blue-400 flex items-center justify-center flex-shrink-0">
+                                <i class="ph ph-image text-lg"></i>
+                            </div>
+                            <div class="flex-1 min-w-0">
+                                <p class="text-sm font-medium truncate">design_draft_v2.png</p>
+                                <p class="text-xs text-zinc-500">2.4 MB</p>
+                            </div>
+                            <i class="ph ph-download-simple text-zinc-500 group-hover:text-indigo-400"></i>
+                        </div>
+                        <div class="flex items-center gap-3 p-2.5 bg-zinc-850 border border-zinc-800 rounded-lg group cursor-pointer hover:border-indigo-500/50 transition-colors">
+                            <div class="w-8 h-8 rounded bg-red-500/10 text-red-400 flex items-center justify-center flex-shrink-0">
+                                <i class="ph ph-file-pdf text-lg"></i>
+                            </div>
+                            <div class="flex-1 min-w-0">
+                                <p class="text-sm font-medium truncate">api_specs.pdf</p>
+                                <p class="text-xs text-zinc-500">850 KB</p>
+                            </div>
+                            <i class="ph ph-download-simple text-zinc-500 group-hover:text-indigo-400"></i>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+        </div>
+        
+        <!-- 하단 내 IP 정보 -->
+        <div class="p-4 border-t border-zinc-800 bg-zinc-900/50">
+            <div class="flex items-center justify-between text-xs text-zinc-500">
+                <span>내 IP 주소</span>
+                <span class="font-mono bg-zinc-800 px-2 py-1 rounded">192.168.0.12</span>
+            </div>
+        </div>
+    </aside>
+
+    <!-- 우측 메인 영역 -->
+    <main class="flex-1 flex flex-col relative bg-[#0c0c0e] hidden md:flex" id="mainArea">
+        
+        <!-- 로비 (방 미접속 시 빈 화면) -->
+        <div id="lobbyView" class="absolute inset-0 flex flex-col items-center justify-center z-10 bg-[#0c0c0e]">
+            <div class="w-24 h-24 rounded-2xl bg-zinc-900 flex items-center justify-center mb-6 shadow-2xl border border-zinc-800">
+                <i class="ph ph-chats-teardrop text-5xl text-zinc-700"></i>
+            </div>
+            <h2 class="text-xl font-semibold text-zinc-300 mb-2">로컬 채팅에 오신 것을 환영합니다</h2>
+            <p class="text-zinc-500 text-sm max-w-sm text-center">
+                좌측에서 방을 생성하거나 전달받은 4자리 코드를 입력하여 보안 채팅을 시작하세요.
+            </p>
+        </div>
+
+        <!-- 방 접속 시 활성화되는 채팅 뷰 -->
+        <div id="chatView" class="hidden flex-col h-full w-full">
+            
+            <!-- 채팅방 헤더 -->
+            <header class="h-16 flex items-center justify-between px-4 lg:px-6 border-b border-zinc-800/50 bg-[#0c0c0e]/80 backdrop-blur-md z-10 shrink-0">
+                <div class="flex items-center gap-3">
+                    <button class="md:hidden p-2 -ml-2 text-zinc-400 hover:text-white" onclick="leaveRoom()">
+                        <i class="ph ph-arrow-left text-xl"></i>
+                    </button>
+                    <div>
+                        <div class="flex items-center gap-2">
+                            <h2 class="font-bold text-lg">방 <span class="text-indigo-400">#4829</span></h2>
+                            <button class="text-zinc-500 hover:text-zinc-300 transition-colors" title="초대 링크 복사">
+                                <i class="ph ph-link"></i>
+                            </button>
+                        </div>
+                        <p class="text-xs text-zinc-500 flex items-center gap-1">
+                            <i class="ph-fill ph-lock-key text-[10px]"></i> 로컬 네트워크 내에서만 공유됨
+                        </p>
+                    </div>
+                </div>
+
+                <div class="flex items-center gap-2">
+                    <!-- 검색 토글 버튼 -->
+                    <button class="p-2 text-zinc-400 hover:bg-zinc-800 hover:text-white rounded-lg transition-colors">
+                        <i class="ph ph-magnifying-glass text-lg"></i>
+                    </button>
+                    
+                    <div class="h-6 w-px bg-zinc-800 mx-1"></div>
+                    
+                    <!-- 방 나가기 -->
+                    <button onclick="leaveRoom()" class="px-3 py-1.5 text-sm font-medium text-zinc-300 hover:bg-zinc-800 rounded-lg transition-colors">
+                        나가기
+                    </button>
+                    <!-- 방 삭제 (방장 전용) -->
+                    <button onclick="showDestroyModal()" class="px-3 py-1.5 text-sm font-medium text-red-400 hover:bg-red-500/10 hover:text-red-300 rounded-lg transition-colors flex items-center gap-1">
+                        <i class="ph ph-trash"></i> <span class="hidden sm:inline">방 삭제</span>
+                    </button>
+                </div>
+            </header>
+
+            <!-- 채팅 메시지 영역 -->
+            <div id="messageContainer" class="flex-1 overflow-y-auto p-4 lg:p-6 flex flex-col gap-5 scroll-smooth relative">
+                
+                <!-- 파일 드롭 안내 오버레이 (숨김 상태) -->
+                <div id="dropOverlay" class="hidden absolute inset-4 border-2 border-dashed border-indigo-500/50 bg-[#0c0c0e]/90 backdrop-blur-sm rounded-xl z-20 flex flex-col items-center justify-center">
+                    <div class="w-16 h-16 rounded-full bg-indigo-500/20 flex items-center justify-center mb-4">
+                        <i class="ph ph-upload-simple text-3xl text-indigo-400 animate-bounce"></i>
+                    </div>
+                    <h3 class="text-xl font-bold text-white mb-2">파일을 여기에 놓으세요</h3>
+                    <p class="text-zinc-400 text-sm">최대 10개, 총 100MB까지 업로드 가능</p>
+                </div>
+
+                <!-- 날짜 구분선 -->
+                <div class="flex items-center justify-center mt-2 mb-4">
+                    <div class="bg-zinc-800/80 px-3 py-1 rounded-full text-xs text-zinc-400 font-medium">
+                        오늘
+                    </div>
+                </div>
+
+                <!-- 시스템 메시지 -->
+                <div class="flex justify-center">
+                    <span class="text-xs text-zinc-500 bg-zinc-900 px-3 py-1 rounded-lg">
+                        192.168.0.12 님이 방을 생성했습니다.
+                    </span>
+                </div>
+
+                <!-- 다른 사람 메시지 -->
+                <div class="flex flex-col gap-1 items-start">
+                    <div class="flex items-end gap-2">
+                        <span class="text-xs text-zinc-500 font-medium ml-1">192.168.0.45</span>
+                    </div>
+                    <div class="flex items-end gap-2">
+                        <div class="bg-zinc-800 text-zinc-100 px-4 py-2.5 rounded-lg rounded-tl-none max-w-[85%] md:max-w-md break-words shadow-sm">
+                            <p>안녕하세요! 접속 테스트 중입니다. 잘 들리나요?</p>
+                        </div>
+                        <span class="text-[10px] text-zinc-500 whitespace-nowrap mb-1">오후 2:34</span>
+                    </div>
+                </div>
+
+                <!-- 내 메시지 -->
+                <div class="flex flex-col gap-1 items-end mt-2">
+                    <div class="flex items-end gap-2 flex-row-reverse">
+                        <div class="bg-indigo-600 text-white px-4 py-2.5 rounded-lg rounded-tr-none max-w-[85%] md:max-w-md break-words shadow-sm shadow-indigo-900/20">
+                            <p>네, 잘 보입니다! UI가 꽤 깔끔하게 나왔네요. 🚀</p>
+                        </div>
+                        <span class="text-[10px] text-zinc-500 whitespace-nowrap mb-1">오후 2:35</span>
+                    </div>
+                </div>
+
+                <!-- 다른 사람 파일 메시지 -->
+                <div class="flex flex-col gap-1 items-start mt-2">
+                    <div class="flex items-end gap-2">
+                        <span class="text-xs text-zinc-500 font-medium ml-1">192.168.0.45</span>
+                    </div>
+                    <div class="flex items-end gap-2">
+                        <div class="bg-zinc-800 text-zinc-100 p-3 rounded-lg rounded-tl-none min-w-[240px] shadow-sm border border-zinc-700/50">
+                            <div class="flex items-center gap-3 mb-2">
+                                <div class="w-10 h-10 rounded bg-blue-500/10 text-blue-400 flex items-center justify-center">
+                                    <i class="ph ph-image text-xl"></i>
+                                </div>
+                                <div class="flex-1 min-w-0">
+                                    <p class="text-sm font-medium truncate">design_draft_v2.png</p>
+                                    <p class="text-xs text-zinc-400">2.4 MB</p>
+                                </div>
+                            </div>
+                            <button class="w-full py-1.5 bg-zinc-700 hover:bg-zinc-600 rounded text-sm font-medium transition-colors flex items-center justify-center gap-1.5">
+                                <i class="ph ph-download-simple"></i> 다운로드
+                            </button>
+                        </div>
+                        <span class="text-[10px] text-zinc-500 whitespace-nowrap mb-1">오후 2:38</span>
+                    </div>
+                </div>
+
+                <!-- 타이핑 인디케이터 -->
+                <div class="flex flex-col gap-1 items-start mt-2" id="typingIndicator">
+                    <div class="flex items-end gap-2">
+                        <span class="text-xs text-zinc-500 font-medium ml-1">192.168.0.88 님이 입력 중...</span>
+                    </div>
+                    <div class="bg-zinc-800/50 px-4 py-3 rounded-lg rounded-tl-none w-fit">
+                        <div class="flex gap-1">
+                            <div class="w-1.5 h-1.5 bg-zinc-500 rounded-full typing-dot"></div>
+                            <div class="w-1.5 h-1.5 bg-zinc-500 rounded-full typing-dot"></div>
+                            <div class="w-1.5 h-1.5 bg-zinc-500 rounded-full typing-dot"></div>
+                        </div>
+                    </div>
+                </div>
+
+            </div>
+
+            <!-- 입력 영역 -->
+            <div class="p-4 bg-[#0c0c0e] border-t border-zinc-800/50 shrink-0 relative">
+                
+                <!-- 파일 업로드 대기열 (있는 경우 표시) -->
+                <div id="uploadQueue" class="hidden flex gap-2 overflow-x-auto pb-2 mb-2">
+                    <div class="relative w-16 h-16 bg-zinc-800 rounded-lg border border-zinc-700 flex items-center justify-center group shrink-0">
+                        <i class="ph ph-file-text text-2xl text-zinc-400"></i>
+                        <button class="absolute -top-1 -right-1 w-5 h-5 bg-zinc-700 hover:bg-red-500 rounded-full flex items-center justify-center text-white text-xs shadow-lg transition-colors">
+                            <i class="ph ph-x"></i>
+                        </button>
+                    </div>
+                </div>
+
+                <div class="relative flex items-end gap-2 bg-zinc-900 border border-zinc-800 focus-within:border-indigo-500/50 rounded-lg p-2 transition-colors shadow-sm">
+                    <!-- 파일 첨부 버튼 -->
+                    <button class="p-2 text-zinc-400 hover:text-indigo-400 hover:bg-zinc-800 rounded-lg transition-colors shrink-0" title="파일 첨부">
+                        <i class="ph ph-paperclip text-xl"></i>
+                    </button>
+                    
+                    <!-- 텍스트 입력창 -->
+                    <textarea id="messageInput" rows="1" placeholder="메시지를 입력하세요 (Enter로 전송, Shift+Enter로 줄바꿈)" 
+                              class="w-full bg-transparent text-sm resize-none focus:outline-none py-2.5 max-h-32 scrollbar-hide text-zinc-100 placeholder:text-zinc-600"
+                              oninput="this.style.height = ''; this.style.height = this.scrollHeight + 'px'"></textarea>
+                    
+                    <!-- 전송 버튼 -->
+                    <button onclick="sendMsg()" class="p-2.5 bg-indigo-600 hover:bg-indigo-500 text-white rounded-lg transition-colors shrink-0 shadow-md shadow-indigo-900/20 disabled:opacity-50 disabled:cursor-not-allowed">
+                        <i class="ph-fill ph-paper-plane-right text-lg"></i>
+                    </button>
+                </div>
+                <div class="text-[10px] text-zinc-500 mt-2 text-right">최대 2000자 / 파일 10개 (100MB)</div>
+            </div>
+        </div>
+    </main>
+
+    <!-- 모달: 방 삭제 확인 -->
+    <div id="destroyModal" class="hidden fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm px-4">
+        <div class="bg-zinc-900 border border-zinc-800 rounded-lg shadow-2xl w-full max-w-sm p-6 transform scale-95 transition-transform duration-200">
+            <div class="w-12 h-12 rounded-full bg-red-500/10 flex items-center justify-center mb-4">
+                <i class="ph ph-warning text-2xl text-red-500"></i>
+            </div>
+            <h3 class="text-lg font-bold text-white mb-2">방을 완전히 삭제하시겠습니까?</h3>
+            <p class="text-sm text-zinc-400 mb-6">
+                방장만 실행 가능한 기능입니다. 모든 메시지와 업로드된 파일이 서버에서 영구적으로 삭제되며, 접속 중인 사용자들은 즉시 퇴장 처리됩니다.
+            </p>
+            <div class="flex gap-3 justify-end">
+                <button onclick="closeModal()" class="px-4 py-2 text-sm font-medium text-zinc-300 hover:bg-zinc-800 rounded-lg transition-colors">
+                    취소
+                </button>
+                <button onclick="confirmDestroy()" class="px-4 py-2 text-sm font-medium bg-red-500 hover:bg-red-600 text-white rounded-lg transition-colors shadow-lg shadow-red-500/20">
+                    삭제하기
+                </button>
+            </div>
+        </div>
+    </div>
+
+    <!-- 토스트 알림 컨테이너 -->
+    <div id="toastContainer" class="fixed bottom-4 right-4 z-50 flex flex-col gap-2"></div>
+
+    <script>
+        // DOM Elements
+        const sidebar = document.getElementById('sidebar');
+        const mainArea = document.getElementById('mainArea');
+        const lobbyView = document.getElementById('lobbyView');
+        const chatView = document.getElementById('chatView');
+        const roomInfoPanel = document.getElementById('roomInfoPanel');
+        const recentRooms = document.getElementById('recentRooms');
+        const messageContainer = document.getElementById('messageContainer');
+        const messageInput = document.getElementById('messageInput');
+        
+        let currentRoom = null;
+
+        // UI Interactions Mock
+        function joinRoom(code = '4829') {
+            currentRoom = code;
+            
+            // 모바일 뷰 처리 (사이드바 숨기고 메인 뷰 표시)
+            if (window.innerWidth < 768) {
+                sidebar.classList.add('hidden');
+                mainArea.classList.remove('hidden');
+            }
+
+            // 데스크탑 뷰 처리
+            lobbyView.classList.add('hidden');
+            chatView.classList.remove('hidden');
+            chatView.style.display = 'flex';
+            
+            // 사이드바 상태 변경
+            recentRooms.classList.add('hidden');
+            roomInfoPanel.classList.remove('hidden');
+            roomInfoPanel.style.display = 'flex';
+
+            showToast(`방 #${code} 에 접속했습니다.`, 'success');
+            scrollToBottom();
+        }
+
+        function createRoom() {
+            joinRoom('4829');
+        }
+
+        function leaveRoom() {
+            currentRoom = null;
+            
+            // 모바일 뷰 처리 (메인 뷰 숨기고 사이드바 표시)
+            if (window.innerWidth < 768) {
+                mainArea.classList.add('hidden');
+                sidebar.classList.remove('hidden');
+            }
+
+            // 뷰 초기화
+            lobbyView.classList.remove('hidden');
+            chatView.classList.add('hidden');
+            chatView.style.display = 'none';
+            
+            recentRooms.classList.remove('hidden');
+            roomInfoPanel.classList.add('hidden');
+            roomInfoPanel.style.display = 'none';
+
+            showToast('방에서 나갔습니다.', 'info');
+        }
+
+        function sendMsg() {
+            const text = messageInput.value.trim();
+            if(!text) return;
+
+            // 로컬에 내 메시지 UI 추가
+            const time = new Date().toLocaleTimeString('ko-KR', { hour: 'numeric', minute: '2-digit' });
+            const msgHtml = `
+                <div class="flex flex-col gap-1 items-end mt-2 animate-[slideIn_0.2s_ease-out]">
+                    <div class="flex items-end gap-2 flex-row-reverse">
+                        <div class="bg-indigo-600 text-white px-4 py-2.5 rounded-lg rounded-tr-none max-w-[85%] md:max-w-md break-words shadow-sm shadow-indigo-900/20">
+                            <p>${text.replace(/\n/g, '<br>')}</p>
+                        </div>
+                        <span class="text-[10px] text-zinc-500 whitespace-nowrap mb-1">${time}</span>
+                    </div>
+                </div>
+            `;
+            
+            // 타이핑 인디케이터 위로 삽입
+            const typingIndicator = document.getElementById('typingIndicator');
+            typingIndicator.insertAdjacentHTML('beforebegin', msgHtml);
+            
+            messageInput.value = '';
+            messageInput.style.height = 'auto'; // 높이 초기화
+            scrollToBottom();
+        }
+
+        // 엔터키 전송 처리
+        messageInput.addEventListener('keydown', function(e) {
+            if (e.key === 'Enter' && !e.shiftKey) {
+                e.preventDefault();
+                sendMsg();
+            }
+        });
+
+        // 모달 관리
+        const modal = document.getElementById('destroyModal');
+        const modalContent = modal.querySelector('div');
+
+        function showDestroyModal() {
+            modal.classList.remove('hidden');
+            // 약간의 지연 후 스케일 애니메이션
+            setTimeout(() => {
+                modalContent.classList.remove('scale-95');
+                modalContent.classList.add('scale-100');
+            }, 10);
+        }
+
+        function closeModal() {
+            modalContent.classList.remove('scale-100');
+            modalContent.classList.add('scale-95');
+            setTimeout(() => {
+                modal.classList.add('hidden');
+            }, 200);
+        }
+
+        function confirmDestroy() {
+            closeModal();
+            leaveRoom();
+            showToast('방이 성공적으로 삭제되었습니다.', 'info');
+        }
+
+        // 유틸리티
+        function scrollToBottom() {
+            messageContainer.scrollTop = messageContainer.scrollHeight;
+        }
+
+        function showToast(message, type = 'info') {
+            const container = document.getElementById('toastContainer');
+            const toast = document.createElement('div');
+            
+            const icon = type === 'success' ? '<i class="ph-fill ph-check-circle text-emerald-400 text-lg"></i>' : 
+                         '<i class="ph-fill ph-info text-indigo-400 text-lg"></i>';
+
+            toast.className = `flex items-center gap-3 px-4 py-3 bg-zinc-800 border border-zinc-700 text-sm text-zinc-100 rounded-lg shadow-xl transform translate-y-10 opacity-0 transition-all duration-300`;
+            toast.innerHTML = `
+                ${icon}
+                <span>${message}</span>
+            `;
+            
+            container.appendChild(toast);
+            
+            // 애니메이션
+            setTimeout(() => {
+                toast.classList.remove('translate-y-10', 'opacity-0');
+            }, 10);
+
+            setTimeout(() => {
+                toast.classList.add('translate-y-10', 'opacity-0');
+                setTimeout(() => toast.remove(), 300);
+            }, 3000);
+        }
+
+        // 드래그 앤 드롭 UI 인터랙션 목업
+        messageContainer.addEventListener('dragover', (e) => {
+            e.preventDefault();
+            document.getElementById('dropOverlay').classList.remove('hidden');
+        });
+
+        messageContainer.addEventListener('dragleave', (e) => {
+            if(e.target === document.getElementById('dropOverlay')) {
+                document.getElementById('dropOverlay').classList.add('hidden');
+            }
+        });
+
+        messageContainer.addEventListener('drop', (e) => {
+            e.preventDefault();
+            document.getElementById('dropOverlay').classList.add('hidden');
+            showToast('파일 업로드를 시작합니다.', 'info');
+        });
+
+        // 윈도우 리사이즈 시 모바일/데스크탑 레이아웃 보정
+        window.addEventListener('resize', () => {
+            if (window.innerWidth >= 768) {
+                sidebar.classList.remove('hidden');
+                mainArea.classList.remove('hidden');
+            } else {
+                if (currentRoom) {
+                    sidebar.classList.add('hidden');
+                } else {
+                    mainArea.classList.add('hidden');
+                }
+            }
+        });
+
+    </script>
+</body>
+</html>

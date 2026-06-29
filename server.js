@@ -1,6 +1,7 @@
 const crypto = require("crypto");
 const fs = require("fs/promises");
 const fsSync = require("fs");
+const os = require("os");
 const path = require("path");
 const express = require("express");
 const http = require("http");
@@ -9,6 +10,7 @@ const { DatabaseSync } = require("node:sqlite");
 const { Server } = require("socket.io");
 
 const PORT = Number(process.env.PORT || 3000);
+const TRUST_PROXY = process.env.TRUST_PROXY === "1";
 const PUBLIC_DIR = path.join(__dirname, "public");
 const DATA_DIR = path.join(__dirname, "data");
 const DB_PATH = path.join(DATA_DIR, "chat.sqlite");
@@ -21,6 +23,9 @@ const MAX_UPLOAD_REQUEST_BYTES = MAX_TOTAL_UPLOAD_BYTES + 1024 * 1024;
 const FILE_TTL_MS = 24 * 60 * 60 * 1000;
 const MESSAGE_LIMIT = 500;
 const TEXT_LIMIT = 2000;
+const NICKNAME_LIMIT = 24;
+const JOIN_RATE_LIMIT_WINDOW_MS = 60 * 1000;
+const MAX_JOIN_ATTEMPTS_PER_WINDOW = 60;
 
 fsSync.mkdirSync(DATA_DIR, { recursive: true });
 
@@ -32,6 +37,7 @@ db.exec(`
   CREATE TABLE IF NOT EXISTS rooms (
     code TEXT PRIMARY KEY,
     owner_ip TEXT NOT NULL,
+    owner_name TEXT,
     created_at INTEGER NOT NULL
   );
 
@@ -44,6 +50,7 @@ db.exec(`
     uploaded_at INTEGER NOT NULL,
     expires_at INTEGER NOT NULL,
     uploaded_by_ip TEXT NOT NULL,
+    uploaded_by_name TEXT,
     disk_path TEXT NOT NULL,
     FOREIGN KEY (room_code) REFERENCES rooms(code) ON DELETE CASCADE
   );
@@ -53,6 +60,7 @@ db.exec(`
     room_code TEXT NOT NULL,
     type TEXT NOT NULL,
     sender_ip TEXT,
+    sender_name TEXT,
     text TEXT NOT NULL,
     file_id TEXT,
     created_at INTEGER NOT NULL,
@@ -67,7 +75,19 @@ db.exec(`
     ON files(room_code, expires_at);
 `);
 
+function ensureColumn(table, column, definition) {
+  const columns = db.prepare(`PRAGMA table_info(${table})`).all();
+  if (!columns.some((item) => item.name === column)) {
+    db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`);
+  }
+}
+
+ensureColumn("rooms", "owner_name", "TEXT");
+ensureColumn("files", "uploaded_by_name", "TEXT");
+ensureColumn("messages", "sender_name", "TEXT");
+
 const presenceByRoom = new Map();
+const joinAttemptsByIp = new Map();
 
 const app = express();
 const server = http.createServer(app);
@@ -86,7 +106,7 @@ const upload = multer({
   },
 });
 
-app.set("trust proxy", true);
+app.set("trust proxy", TRUST_PROXY);
 app.use(express.json());
 app.use(express.static(PUBLIC_DIR));
 
@@ -97,19 +117,46 @@ function normalizeIp(ip) {
     .replace(/^::ffff:/, "");
 }
 
+function getLocalNetworkUrls(port) {
+  const urls = [];
+  for (const interfaces of Object.values(os.networkInterfaces())) {
+    for (const item of interfaces || []) {
+      const address = item.address || "";
+      const isLikelyUsableHost = !address.endsWith(".0") && !address.endsWith(".255");
+      if (item.family === "IPv4" && !item.internal && isLikelyUsableHost) {
+        urls.push(`http://${item.address}:${port}`);
+      }
+    }
+  }
+  return urls;
+}
+
 function getRequestIp(req) {
-  return normalizeIp(req.headers["x-forwarded-for"] || req.ip || req.socket.remoteAddress);
+  const forwardedFor = TRUST_PROXY ? req.headers["x-forwarded-for"] : "";
+  return normalizeIp(forwardedFor || req.ip || req.socket.remoteAddress);
 }
 
 function getSocketIp(socket) {
-  return normalizeIp(
-    socket.handshake.headers["x-forwarded-for"] || socket.handshake.address
-  );
+  const forwardedFor = TRUST_PROXY ? socket.handshake.headers["x-forwarded-for"] : "";
+  return normalizeIp(forwardedFor || socket.handshake.address);
 }
 
 function sanitizeRoomCode(value) {
   const code = String(value || "").trim();
   return ROOM_CODE_PATTERN.test(code) ? code : null;
+}
+
+function fallbackNickname(ip) {
+  const tail = String(ip || "").split(".").filter(Boolean).pop();
+  return tail ? `사용자-${tail}` : "사용자";
+}
+
+function sanitizeNickname(value, ip) {
+  const cleaned = String(value || "")
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, NICKNAME_LIMIT);
+  return cleaned || fallbackNickname(ip);
 }
 
 function sanitizeFileName(name) {
@@ -127,7 +174,10 @@ function getRoom(code) {
   return (
     db
       .prepare(
-        `SELECT code, owner_ip AS ownerIp, created_at AS createdAt
+        `SELECT code,
+                owner_ip AS ownerIp,
+                owner_name AS ownerName,
+                created_at AS createdAt
          FROM rooms
          WHERE code = ?`
       )
@@ -147,6 +197,30 @@ function generateRoomCode() {
     }
   }
   throw new Error("사용 가능한 방 코드가 없습니다.");
+}
+
+function isJoinRateLimited(ip) {
+  const now = Date.now();
+  const attempts = (joinAttemptsByIp.get(ip) || []).filter(
+    (timestamp) => now - timestamp < JOIN_RATE_LIMIT_WINDOW_MS
+  );
+  attempts.push(now);
+  joinAttemptsByIp.set(ip, attempts);
+  return attempts.length > MAX_JOIN_ATTEMPTS_PER_WINDOW;
+}
+
+function cleanupJoinAttempts() {
+  const now = Date.now();
+  for (const [ip, attempts] of joinAttemptsByIp.entries()) {
+    const activeAttempts = attempts.filter(
+      (timestamp) => now - timestamp < JOIN_RATE_LIMIT_WINDOW_MS
+    );
+    if (activeAttempts.length === 0) {
+      joinAttemptsByIp.delete(ip);
+      continue;
+    }
+    joinAttemptsByIp.set(ip, activeAttempts);
+  }
 }
 
 function getCount(sql, ...params) {
@@ -178,6 +252,7 @@ function getPresence(room) {
     if (!current) {
       usersByIp.set(user.ip, {
         ip: user.ip,
+        nickname: user.nickname,
         sockets: 1,
         joinedAt: user.joinedAt,
         isOwner: room.ownerIp === user.ip,
@@ -186,6 +261,7 @@ function getPresence(room) {
     }
     current.sockets += 1;
     current.joinedAt = Math.min(current.joinedAt, user.joinedAt);
+    current.nickname = user.nickname || current.nickname;
   }
   return [...usersByIp.values()].sort((a, b) => Number(b.isOwner) - Number(a.isOwner));
 }
@@ -194,6 +270,7 @@ function publicRoom(room, ip) {
   return {
     code: room.code,
     ownerIp: room.ownerIp,
+    ownerName: room.ownerName,
     createdAt: room.createdAt,
     userCount: getPresence(room).length,
     messageCount: getCount("SELECT COUNT(*) AS count FROM messages WHERE room_code = ?", room.code),
@@ -219,6 +296,7 @@ function mapFileRow(row) {
     uploadedAt: row.uploadedAt,
     expiresAt: row.expiresAt,
     uploadedByIp: row.uploadedByIp,
+    uploadedByName: row.uploadedByName,
     diskPath: row.diskPath,
   };
 }
@@ -232,6 +310,7 @@ function publicFile(file) {
     uploadedAt: file.uploadedAt,
     expiresAt: file.expiresAt,
     uploadedByIp: file.uploadedByIp,
+    uploadedByName: file.uploadedByName,
     downloadUrl: `/api/rooms/${file.roomCode}/files/${file.id}/download`,
   };
 }
@@ -247,6 +326,7 @@ function getActiveFiles(roomCode) {
               uploaded_at AS uploadedAt,
               expires_at AS expiresAt,
               uploaded_by_ip AS uploadedByIp,
+              uploaded_by_name AS uploadedByName,
               disk_path AS diskPath
        FROM files
        WHERE room_code = ? AND expires_at > ?
@@ -269,6 +349,7 @@ function getFile(roomCode, fileId) {
                 uploaded_at AS uploadedAt,
                 expires_at AS expiresAt,
                 uploaded_by_ip AS uploadedByIp,
+                uploaded_by_name AS uploadedByName,
                 disk_path AS diskPath
          FROM files
          WHERE room_code = ? AND id = ?`
@@ -284,6 +365,7 @@ function getRecentMessages(roomCode) {
               m.room_code AS roomCode,
               m.type,
               m.sender_ip AS senderIp,
+              m.sender_name AS senderName,
               m.text,
               m.created_at AS createdAt,
               f.id AS fileId,
@@ -294,6 +376,7 @@ function getRecentMessages(roomCode) {
               f.uploaded_at AS fileUploadedAt,
               f.expires_at AS fileExpiresAt,
               f.uploaded_by_ip AS fileUploadedByIp,
+              f.uploaded_by_name AS fileUploadedByName,
               f.disk_path AS fileDiskPath
        FROM (
          SELECT *
@@ -312,6 +395,7 @@ function getRecentMessages(roomCode) {
         roomCode: row.roomCode,
         type: row.type,
         senderIp: row.senderIp,
+        senderName: row.senderName,
         text: row.text,
         createdAt: row.createdAt,
       };
@@ -325,6 +409,7 @@ function getRecentMessages(roomCode) {
           uploadedAt: row.fileUploadedAt,
           expiresAt: row.fileExpiresAt,
           uploadedByIp: row.fileUploadedByIp,
+          uploadedByName: row.fileUploadedByName,
           diskPath: row.fileDiskPath,
         });
       }
@@ -353,18 +438,20 @@ function addMessage(roomCode, message) {
     createdAt: Date.now(),
     type: message.type,
     senderIp: message.senderIp || null,
+    senderName: message.senderName || null,
     text: message.text || "",
     file: message.file,
   };
 
   db.prepare(
-    `INSERT INTO messages (id, room_code, type, sender_ip, text, file_id, created_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?)`
+    `INSERT INTO messages (id, room_code, type, sender_ip, sender_name, text, file_id, created_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
   ).run(
     saved.id,
     saved.roomCode,
     saved.type,
     saved.senderIp,
+    saved.senderName,
     saved.text,
     message.fileId || null,
     saved.createdAt
@@ -375,19 +462,17 @@ function addMessage(roomCode, message) {
   return saved;
 }
 
-function createRoom(ownerIp) {
+function createRoom(ownerIp, ownerName) {
   const code = generateRoomCode();
   const createdAt = Date.now();
-  db.prepare("INSERT INTO rooms (code, owner_ip, created_at) VALUES (?, ?, ?)").run(
-    code,
-    ownerIp,
-    createdAt
-  );
+  db.prepare(
+    "INSERT INTO rooms (code, owner_ip, owner_name, created_at) VALUES (?, ?, ?, ?)"
+  ).run(code, ownerIp, ownerName, createdAt);
   addMessage(code, {
     type: "system",
-    text: "방이 생성되었습니다.",
+    text: `${ownerName} 님이 방을 생성했습니다.`,
   });
-  return { code, ownerIp, createdAt };
+  return { code, ownerIp, ownerName, createdAt };
 }
 
 async function removeRoomFiles(roomCode) {
@@ -433,6 +518,17 @@ function emitPresence(room) {
   });
 }
 
+function getTypingUsers(presence) {
+  return [...presence.typingByIp.keys()];
+}
+
+function emitTyping(room, presence) {
+  io.to(room.code).emit("typingChanged", {
+    roomCode: room.code,
+    users: getTypingUsers(presence),
+  });
+}
+
 function leaveSocketRoom(socket) {
   const code = socket.data.roomCode;
   if (!code) {
@@ -456,6 +552,7 @@ function leaveSocketRoom(socket) {
   }
   if (room) {
     emitPresence(room);
+    emitTyping(room, presence);
   }
 }
 
@@ -506,7 +603,8 @@ app.get("/api/me", (req, res) => {
 
 app.post("/api/rooms", (req, res) => {
   const ip = getRequestIp(req);
-  const room = createRoom(ip);
+  const nickname = sanitizeNickname(req.body?.nickname, ip);
+  const room = createRoom(ip, nickname);
   res.status(201).json({ room: publicRoom(room, ip) });
 });
 
@@ -524,7 +622,7 @@ app.post("/api/rooms/:code/destroy", loadRoom, async (req, res, next) => {
   const room = req.chatRoom;
   const ip = getRequestIp(req);
   if (room.ownerIp !== ip) {
-    res.status(403).json({ error: "방장만 방을 터뜨릴 수 있습니다." });
+    res.status(403).json({ error: "방장만 방을 삭제할 수 있습니다." });
     return;
   }
 
@@ -536,89 +634,100 @@ app.post("/api/rooms/:code/destroy", loadRoom, async (req, res, next) => {
   }
 });
 
-app.post("/api/rooms/:code/files", loadRoom, rejectLargeUploadRequest, handleUpload, async (req, res, next) => {
-  const room = req.chatRoom;
-  const files = req.files || [];
-  if (files.length === 0) {
-    res.status(400).json({ error: "업로드할 파일을 선택해주세요." });
-    return;
-  }
-
-  const totalSize = files.reduce((sum, file) => sum + file.size, 0);
-  if (files.length > MAX_FILES_PER_UPLOAD || totalSize > MAX_TOTAL_UPLOAD_BYTES) {
-    await cleanupUploadedFiles(files);
-    res.status(400).json({ error: "한 번에 최대 10개, 총 100MB까지 업로드할 수 있습니다." });
-    return;
-  }
-
-  const movedFiles = [];
-  try {
-    const ip = getRequestIp(req);
-    const roomDir = path.join(UPLOAD_DIR, room.code);
-    await fs.mkdir(roomDir, { recursive: true });
-
-    const uploaded = [];
-    for (const file of files) {
-      const id = crypto.randomUUID();
-      const safeName = sanitizeFileName(file.originalname);
-      const diskPath = path.join(roomDir, id);
-      const uploadedAt = Date.now();
-      const record = {
-        id,
-        roomCode: room.code,
-        name: safeName,
-        size: file.size,
-        mimeType: file.mimetype || "application/octet-stream",
-        uploadedAt,
-        expiresAt: uploadedAt + FILE_TTL_MS,
-        uploadedByIp: ip,
-        diskPath,
-      };
-
-      await fs.rename(file.path, diskPath);
-      movedFiles.push(diskPath);
-      db.prepare(
-        `INSERT INTO files (
-           id,
-           room_code,
-           name,
-           size,
-           mime_type,
-           uploaded_at,
-           expires_at,
-           uploaded_by_ip,
-           disk_path
-         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
-      ).run(
-        record.id,
-        record.roomCode,
-        record.name,
-        record.size,
-        record.mimeType,
-        record.uploadedAt,
-        record.expiresAt,
-        record.uploadedByIp,
-        record.diskPath
-      );
-
-      const visibleFile = publicFile(record);
-      uploaded.push(visibleFile);
-      addMessage(room.code, {
-        type: "file",
-        senderIp: ip,
-        text: `${safeName} 파일을 업로드했습니다.`,
-        fileId: record.id,
-        file: visibleFile,
-      });
+app.post(
+  "/api/rooms/:code/files",
+  loadRoom,
+  rejectLargeUploadRequest,
+  handleUpload,
+  async (req, res, next) => {
+    const room = req.chatRoom;
+    const files = req.files || [];
+    if (files.length === 0) {
+      res.status(400).json({ error: "업로드할 파일을 선택해주세요." });
+      return;
     }
 
-    res.status(201).json({ files: uploaded });
-  } catch (error) {
-    await cleanupUploadedFiles(files);
-    await Promise.all(movedFiles.map((filePath) => fs.rm(filePath, { force: true })));
-    next(error);
+    const totalSize = files.reduce((sum, file) => sum + file.size, 0);
+    if (files.length > MAX_FILES_PER_UPLOAD || totalSize > MAX_TOTAL_UPLOAD_BYTES) {
+      await cleanupUploadedFiles(files);
+      res.status(400).json({ error: "한 번에 최대 10개, 총 100MB까지 업로드할 수 있습니다." });
+      return;
+    }
+
+    const movedFiles = [];
+    try {
+      const ip = getRequestIp(req);
+      const nickname = sanitizeNickname(req.body?.nickname, ip);
+      const roomDir = path.join(UPLOAD_DIR, room.code);
+      await fs.mkdir(roomDir, { recursive: true });
+
+      const uploaded = [];
+      for (const file of files) {
+        const id = crypto.randomUUID();
+        const safeName = sanitizeFileName(file.originalname);
+        const diskPath = path.join(roomDir, id);
+        const uploadedAt = Date.now();
+        const record = {
+          id,
+          roomCode: room.code,
+          name: safeName,
+          size: file.size,
+          mimeType: file.mimetype || "application/octet-stream",
+          uploadedAt,
+          expiresAt: uploadedAt + FILE_TTL_MS,
+          uploadedByIp: ip,
+          uploadedByName: nickname,
+          diskPath,
+        };
+
+        await fs.rename(file.path, diskPath);
+        movedFiles.push(diskPath);
+        db.prepare(
+          `INSERT INTO files (
+             id,
+             room_code,
+             name,
+             size,
+             mime_type,
+             uploaded_at,
+             expires_at,
+             uploaded_by_ip,
+             uploaded_by_name,
+             disk_path
+           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+        ).run(
+          record.id,
+          record.roomCode,
+          record.name,
+          record.size,
+          record.mimeType,
+          record.uploadedAt,
+          record.expiresAt,
+          record.uploadedByIp,
+          record.uploadedByName,
+          record.diskPath
+        );
+
+        const visibleFile = publicFile(record);
+        uploaded.push(visibleFile);
+        addMessage(room.code, {
+          type: "file",
+          senderIp: ip,
+          senderName: nickname,
+          text: `${safeName} 파일을 업로드했습니다.`,
+          fileId: record.id,
+          file: visibleFile,
+        });
+      }
+
+      res.status(201).json({ files: uploaded });
+    } catch (error) {
+      await cleanupUploadedFiles(files);
+      await Promise.all(movedFiles.map((filePath) => fs.rm(filePath, { force: true })));
+      next(error);
+    }
   }
-});
+);
 
 app.get("/api/rooms/:code/files/:fileId/download", async (req, res, next) => {
   const code = sanitizeRoomCode(req.params.code);
@@ -643,12 +752,28 @@ app.get("/api/rooms/:code/files/:fileId/download", async (req, res, next) => {
 
 io.on("connection", (socket) => {
   const ip = getSocketIp(socket);
+  socket.data.ip = ip;
+  socket.data.nickname = fallbackNickname(ip);
 
-  socket.on("joinRoom", ({ roomCode } = {}) => {
+  socket.on("joinRoom", ({ roomCode, nickname } = {}, reply) => {
+    const hasReply = typeof reply === "function";
+    const respond = hasReply ? reply : () => {};
+    if (isJoinRateLimited(ip)) {
+      const error = "입장 요청이 너무 많습니다. 잠시 후 다시 시도해주세요.";
+      if (!hasReply) {
+        socket.emit("errorMessage", error);
+      }
+      respond({ ok: false, error });
+      return;
+    }
+
     const code = sanitizeRoomCode(roomCode);
     const room = code ? getRoom(code) : null;
     if (!room) {
-      socket.emit("errorMessage", "방을 찾을 수 없습니다.");
+      if (!hasReply) {
+        socket.emit("errorMessage", "방을 찾을 수 없습니다.");
+      }
+      respond({ ok: false, error: "방을 찾을 수 없습니다." });
       return;
     }
 
@@ -657,11 +782,14 @@ io.on("connection", (socket) => {
     }
 
     const presence = getPresenceState(code);
+    const cleanNickname = sanitizeNickname(nickname, ip);
     socket.data.roomCode = code;
     socket.data.ip = ip;
+    socket.data.nickname = cleanNickname;
     socket.join(code);
     presence.sockets.set(socket.id, {
       ip,
+      nickname: cleanNickname,
       joinedAt: Date.now(),
     });
 
@@ -670,33 +798,66 @@ io.on("connection", (socket) => {
       messages: getRecentMessages(code),
       files: getActiveFiles(code),
       users: getPresence(room),
-      me: { ip },
+      me: { ip, nickname: cleanNickname },
     });
     emitPresence(room);
+    respond({ ok: true });
   });
 
-  socket.on("sendMessage", ({ text } = {}) => {
+  socket.on("sendMessage", ({ text, nickname } = {}, reply) => {
+    const hasReply = typeof reply === "function";
+    const respond = hasReply ? reply : () => {};
     const code = socket.data.roomCode;
     const room = code ? getRoom(code) : null;
     if (!room) {
-      socket.emit("errorMessage", "먼저 방에 입장해주세요.");
+      if (!hasReply) {
+        socket.emit("errorMessage", "먼저 방에 입장해주세요.");
+      }
+      respond({ ok: false, error: "먼저 방에 입장해주세요." });
       return;
     }
 
     const cleaned = String(text || "").trim();
     if (!cleaned) {
+      respond({ ok: false, error: "메시지를 입력해주세요." });
       return;
     }
     if (cleaned.length > TEXT_LIMIT) {
-      socket.emit("errorMessage", `메시지는 ${TEXT_LIMIT}자까지 보낼 수 있습니다.`);
+      const error = `메시지는 ${TEXT_LIMIT}자까지 보낼 수 있습니다.`;
+      if (!hasReply) {
+        socket.emit("errorMessage", error);
+      }
+      respond({ ok: false, error });
       return;
     }
 
-    addMessage(room.code, {
+    const cleanNickname = sanitizeNickname(
+      nickname || socket.data.nickname,
+      socket.data.ip || ip
+    );
+    socket.data.nickname = cleanNickname;
+    const message = addMessage(room.code, {
       type: "text",
       senderIp: socket.data.ip || ip,
+      senderName: cleanNickname,
       text: cleaned,
     });
+    respond({ ok: true, message });
+  });
+
+  socket.on("updateNickname", ({ nickname } = {}) => {
+    const cleanNickname = sanitizeNickname(nickname, socket.data.ip || ip);
+    socket.data.nickname = cleanNickname;
+    const code = socket.data.roomCode;
+    const room = code ? getRoom(code) : null;
+    const presence = code ? presenceByRoom.get(code) : null;
+    const user = presence?.sockets.get(socket.id);
+    if (user) {
+      user.nickname = cleanNickname;
+    }
+    if (room && presence) {
+      emitPresence(room);
+    }
   });
 
   socket.on("typing", ({ isTyping } = {}) => {
@@ -713,30 +874,42 @@ io.on("connection", (socket) => {
     } else {
       presence.typingByIp.delete(typingIp);
     }
-    const typingUsers = [...presence.typingByIp.keys()];
-    socket.to(code).emit("typingChanged", { roomCode: code, users: typingUsers });
+    emitTyping(room, presence);
   });
 
   socket.on("leaveRoom", () => {
     leaveSocketRoom(socket);
   });
 
-  socket.on("destroyRoom", async () => {
+  socket.on("destroyRoom", async (reply) => {
+    const hasReply = typeof reply === "function";
+    const respond = hasReply ? reply : () => {};
     const code = socket.data.roomCode;
     const room = code ? getRoom(code) : null;
     if (!room) {
-      socket.emit("errorMessage", "방을 찾을 수 없습니다.");
+      if (!hasReply) {
+        socket.emit("errorMessage", "방을 찾을 수 없습니다.");
+      }
+      respond({ ok: false, error: "방을 찾을 수 없습니다." });
       return;
     }
     const requesterIp = socket.data.ip || ip;
     if (room.ownerIp !== requesterIp) {
-      socket.emit("errorMessage", "방장만 방을 터뜨릴 수 있습니다.");
+      if (!hasReply) {
+        socket.emit("errorMessage", "방장만 방을 삭제할 수 있습니다.");
+      }
+      respond({ ok: false, error: "방장만 방을 삭제할 수 있습니다." });
       return;
     }
     try {
       await destroyRoom(room, requesterIp);
+      respond({ ok: true });
     } catch (error) {
-      socket.emit("errorMessage", "방을 터뜨리는 중 오류가 발생했습니다.");
+      const message = "방을 삭제하는 중 오류가 발생했습니다.";
+      if (!hasReply) {
+        socket.emit("errorMessage", message);
+      }
+      respond({ ok: false, error: message });
     }
   });
 
@@ -772,6 +945,7 @@ async function cleanupExpiredFiles() {
               uploaded_at AS uploadedAt,
               expires_at AS expiresAt,
               uploaded_by_ip AS uploadedByIp,
+              uploaded_by_name AS uploadedByName,
               disk_path AS diskPath
        FROM files
        WHERE expires_at <= ?`
@@ -785,6 +959,7 @@ async function cleanupExpiredFiles() {
 }
 
 setInterval(() => {
+  cleanupJoinAttempts();
   cleanupExpiredFiles().catch((error) => {
     console.error("Expired file cleanup failed:", error);
   });
@@ -807,6 +982,9 @@ async function startServer() {
   await cleanupExpiredFiles();
   server.listen(PORT, "0.0.0.0", () => {
     console.log(`Local Chat running at http://localhost:${PORT}`);
+    for (const url of getLocalNetworkUrls(PORT)) {
+      console.log(`LAN access: ${url}`);
+    }
   });
 }
 
