@@ -889,12 +889,12 @@ textarea:disabled {
   background: var(--blue-soft);
   display: grid;
   gap: 8px;
+  overflow-wrap: anywhere;
 }
 
 .file-message a {
   color: #bfdbfe;
   font-weight: 760;
-  overflow-wrap: anywhere;
 }
 
 .file-meta {

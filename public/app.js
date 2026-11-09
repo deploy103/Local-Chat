@@ -509,14 +509,16 @@ function renderMessages() {
     if (message.type === "file" && message.file) {
       const file = document.createElement("div");
       file.className = "file-message";
-      const link = document.createElement("a");
-      link.href = message.file.downloadUrl;
+      const link = document.createElement(message.file.expired ? "span" : "a");
+      if (!message.file.expired) {
+        link.href = message.file.downloadUrl;
+      }
       link.textContent = message.file.name;
       const fileMeta = document.createElement("div");
       fileMeta.className = "file-meta";
       fileMeta.textContent = `${formatBytes(message.file.size)} · ${formatDateTime(
         message.file.expiresAt
-      )} 만료`;
+      )} ${message.file.expired ? "만료됨" : "만료"}`;
       file.append(link, fileMeta);
       node.append(file);
     }
@@ -945,9 +947,19 @@ socket.on("fileExpired", ({ roomCode, fileId }) => {
     return;
   }
   state.files = state.files.filter((file) => file.id !== fileId);
+  let messagesChanged = false;
+  for (const message of state.messages) {
+    if (message.file?.id === fileId) {
+      message.file = { ...message.file, expired: true };
+      messagesChanged = true;
+    }
+  }
   els.fileCount.textContent = String(state.files.length);
   els.summaryFileCount.textContent = String(state.files.length);
   renderFiles();
+  if (messagesChanged) {
+    renderMessages();
+  }
 });
 
 socket.on("roomDestroyed", ({ roomCode, destroyedByIp }) => {
